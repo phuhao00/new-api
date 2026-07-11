@@ -19,6 +19,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # 小内存机器默认不构建 classic 主题（占位即可）；需要 classic 时改为 "1"
+        BUILD_CLASSIC: "0"
     image: new-api:local
     container_name: new-api
     restart: always

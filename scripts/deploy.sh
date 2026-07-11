@@ -90,6 +90,44 @@ ensure_docker() {
   exit 1
 }
 
+# rsbuild 在 1–2G 机器上容易被 OOM SIGKILL；构建前尽量准备 swap 并腾出内存
+ensure_build_memory() {
+  local mem_kb swap_kb
+  mem_kb="$(awk '/MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+  swap_kb="$(awk '/SwapTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+
+  if [[ "$mem_kb" -gt 0 ]]; then
+    echo "[deploy] 内存: $((mem_kb / 1024))MB  swap: $((swap_kb / 1024))MB"
+  fi
+
+  # 已有足够 swap 或物理内存较充裕则跳过
+  if [[ "$swap_kb" -ge 1048576 ]] || [[ "$mem_kb" -ge 3145728 ]]; then
+    return 0
+  fi
+
+  if [[ "$(id -u)" -ne 0 ]]; then
+    echo "[warn] 内存较小且无足够 swap；若构建再次 SIGKILL，请用 root 重跑以自动创建 swap，或手动: fallocate -l 2G /swapfile && mkswap /swapfile && swapon /swapfile"
+    return 0
+  fi
+
+  if [[ ! -f /swapfile ]]; then
+    echo "[deploy] 创建 2G swap 以防前端构建 OOM..."
+    fallocate -l 2G /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=2048 status=none
+    chmod 600 /swapfile
+    mkswap /swapfile >/dev/null
+  fi
+  if ! swapon --show 2>/dev/null | grep -q '/swapfile'; then
+    swapon /swapfile 2>/dev/null || true
+  fi
+  swap_kb="$(awk '/SwapTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+  echo "[deploy] swap 就绪: $((swap_kb / 1024))MB"
+}
+
+stop_for_build() {
+  echo "[deploy] 构建前暂停已有容器，腾出内存..."
+  docker compose -f "$COMPOSE_FILE" stop >/dev/null 2>&1 || true
+}
+
 # 防止误用官方镜像：拉代码却不重建会导致线上仍是 New API
 ensure_local_compose() {
   if [[ ! -f "$COMPOSE_FILE" ]]; then
@@ -207,9 +245,15 @@ mkdir -p data logs
 free_port "$API_PORT"
 
 if [[ "$DO_BUILD" -eq 1 ]]; then
+  ensure_build_memory
+  stop_for_build
   echo "[deploy] 构建并启动服务 ($COMPOSE_FILE)..."
-  echo "[deploy] 说明: 首次/改前端后构建可能需要几分钟，请耐心等待"
-  docker compose -f "$COMPOSE_FILE" up -d --build
+  echo "[deploy] 说明: 前端构建较耗内存；已限制并行并默认跳过 classic 主题"
+  echo "[deploy] 首次/改前端后可能需要几分钟，请耐心等待"
+  # 限制 BuildKit 并行阶段，避免 default+go 等同时吃满内存
+  export BUILDKIT_PROGRESS="${BUILDKIT_PROGRESS:-plain}"
+  docker compose -f "$COMPOSE_FILE" build --build-arg BUILD_CLASSIC="${BUILD_CLASSIC:-0}"
+  docker compose -f "$COMPOSE_FILE" up -d
 else
   echo "[deploy] 启动服务（跳过 build）($COMPOSE_FILE)..."
   docker compose -f "$COMPOSE_FILE" up -d
