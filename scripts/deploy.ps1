@@ -16,6 +16,7 @@
   .\scripts\deploy.ps1
   .\scripts\deploy.ps1 -Mode local
   .\scripts\deploy.ps1 -Mode docker
+  .\scripts\deploy.ps1 -Mode docker -NoBuild
   .\scripts\deploy.ps1 -Stop
 #>
 [CmdletBinding()]
@@ -24,6 +25,10 @@ param(
   [string]$Mode = 'local',
 
   [switch]$Stop,
+
+  [switch]$NoBuild,
+
+  [switch]$NoSyncBrand,
 
   [int]$ApiPort = 0,
 
@@ -34,6 +39,10 @@ param(
   # 启动前强制杀掉占用所需端口的进程（默认开启）
   [bool]$ForceFreePorts = $true
 )
+
+$BrandName = if ($env:BRAND_NAME) { $env:BRAND_NAME } else { 'Bony API' }
+$BrandLogo = if ($env:BRAND_LOGO) { $env:BRAND_LOGO } else { '/logo-bony.png' }
+$BrandFooter = if ($env:BRAND_FOOTER) { $env:BRAND_FOOTER } else { 'Bony API' }
 
 $ErrorActionPreference = 'Stop'
 $Root = Resolve-Path (Join-Path $PSScriptRoot '..')
@@ -401,40 +410,134 @@ function Stop-Docker {
   }
 }
 
+function Test-ApiStatus([int]$Port) {
+  try {
+    $resp = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/api/status" -UseBasicParsing -TimeoutSec 2
+    return ($resp.StatusCode -eq 200)
+  } catch {
+    return $false
+  }
+}
+
+function Wait-ApiReady([int]$Port, [int]$MaxWaitSeconds = 120) {
+  Write-Step "等待 API 就绪（最多 ${MaxWaitSeconds}s）: http://localhost:${Port}/api/status"
+  for ($i = 0; $i -lt $MaxWaitSeconds; $i++) {
+    if (Test-ApiStatus $Port) {
+      Write-Ok "API 已就绪 (${i}s)"
+      return $true
+    }
+    if (($i -gt 0) -and ($i % 5 -eq 0)) {
+      Write-Host "[deploy] 仍在等待... $i/${MaxWaitSeconds}s" -ForegroundColor DarkGray
+    }
+    Start-Sleep -Seconds 1
+  }
+  return $false
+}
+
+function Assert-LocalCompose {
+  $compose = Join-Path $Root 'docker-compose.yml'
+  if (-not (Test-Path $compose)) {
+    throw "缺少 docker-compose.yml"
+  }
+  $text = Get-Content -Path $compose -Raw -Encoding UTF8
+  if ($text -match 'image:\s*calciumion/new-api') {
+    throw "docker-compose.yml 仍使用官方镜像 calciumion/new-api。请 git pull 最新代码后再部署。"
+  }
+  if ($text -notmatch '(?m)^\s*build:') {
+    throw "docker-compose.yml 未配置 build，无法把本地品牌改动打进镜像。"
+  }
+}
+
+function Sync-DockerBrand {
+  $pg = docker ps --format '{{.Names}}' 2>$null | Where-Object { $_ -eq 'postgres' }
+  if (-not $pg) {
+    Write-Warn "未找到 postgres 容器，跳过品牌同步"
+    return
+  }
+
+  Write-Step "同步站点品牌: name=$BrandName logo=$BrandLogo"
+  $sql = @"
+INSERT INTO options ("key", value) VALUES ('SystemName', '$BrandName')
+  ON CONFLICT ("key") DO UPDATE SET value = EXCLUDED.value;
+INSERT INTO options ("key", value) VALUES ('Logo', '$BrandLogo')
+  ON CONFLICT ("key") DO UPDATE SET value = EXCLUDED.value;
+INSERT INTO options ("key", value) VALUES ('Footer', '$BrandFooter')
+  ON CONFLICT ("key") DO UPDATE SET value = EXCLUDED.value;
+"@
+  $sql | docker exec -i postgres psql -U root -d new-api -v ON_ERROR_STOP=1
+  if ($LASTEXITCODE -ne 0) {
+    Write-Warn "品牌 SQL 写入失败，请手动在后台系统设置中修改"
+    return
+  }
+
+  Write-Step "重启 new-api 以加载品牌配置..."
+  docker compose restart new-api | Out-Null
+  [void](Wait-ApiReady 3000 60)
+
+  try {
+    $body = (Invoke-WebRequest -Uri 'http://127.0.0.1:3000/api/status' -UseBasicParsing -TimeoutSec 5).Content
+    if ($body -match [regex]::Escape("`"$BrandName`"") -or $body -match [regex]::Escape($BrandName)) {
+      Write-Ok "品牌已生效: $BrandName"
+    } else {
+      Write-Warn "品牌可能尚未刷新，请强制刷新浏览器（Ctrl+F5）"
+    }
+  } catch {
+    Write-Warn "无法校验 /api/status，请打开后台确认站点名称/Logo"
+  }
+}
+
 function Start-Docker {
   Refresh-Path
   if (-not (Test-Command 'docker')) {
     throw "未安装 Docker。请先安装 Docker Desktop，或改用: .\scripts\deploy.ps1 -Mode local"
   }
 
+  Assert-LocalCompose
+
   if ($ForceFreePorts) {
     Clear-PortForce 3000 'Docker-API'
   }
 
   New-Item -ItemType Directory -Force -Path $DataDir, $LogDir | Out-Null
-  Write-Step "启动 Docker Compose（镜像 calciumion/new-api:latest）..."
   Push-Location $Root
   try {
-    docker compose up -d
-    Write-Step "等待服务就绪..."
-    $ok = $false
-    for ($i = 0; $i -lt 60; $i++) {
-      Start-Sleep -Seconds 2
-      if (Test-PortOpen 3000) {
-        $ok = $true
-        break
+    if ($NoBuild) {
+      Write-Step "启动 Docker Compose（跳过 build）..."
+      docker compose up -d
+    } else {
+      Write-Step "构建并启动 Docker Compose（本地 Dockerfile / new-api:local）..."
+      Write-Host "[deploy] 说明: 首次/改前端后构建可能需要几分钟" -ForegroundColor DarkGray
+      docker compose up -d --build
+    }
+
+    $img = docker inspect -f '{{.Config.Image}}' new-api 2>$null
+    if ($img) {
+      Write-Host "[deploy] 当前镜像: $img" -ForegroundColor DarkGray
+      if ("$img" -like '*calciumion/new-api*') {
+        Write-Warn "仍在使用官方镜像！请确认已 git pull 且未使用 -NoBuild"
       }
     }
-    if ($ok) {
-      Write-Ok "部署成功"
-      Write-Host ""
-      Write-Host "  访问地址: http://localhost:3000/" -ForegroundColor Green
-      Write-Host "  数据目录: $DataDir" -ForegroundColor DarkGray
-      Write-Host "  停止服务: .\scripts\deploy.ps1 -Mode docker -Stop" -ForegroundColor DarkGray
-    } else {
-      Write-Warn "容器已启动，但健康检查尚未通过，请稍后访问 http://localhost:3000/"
+
+    $ok = Wait-ApiReady 3000 120
+    if (-not $ok) {
+      Write-Warn "容器已启动，但健康检查尚未通过"
       docker compose ps
+      docker logs new-api --tail 40 2>$null
+      return
     }
+
+    if (-not $NoSyncBrand) {
+      Sync-DockerBrand
+    }
+
+    Write-Ok "部署成功"
+    Write-Host ""
+    Write-Host "  访问地址: http://localhost:3000/" -ForegroundColor Green
+    Write-Host "  站点名称: $BrandName" -ForegroundColor DarkGray
+    Write-Host "  Logo:     $BrandLogo" -ForegroundColor DarkGray
+    Write-Host "  数据目录: $DataDir" -ForegroundColor DarkGray
+    Write-Host "  停止服务: .\scripts\deploy.ps1 -Mode docker -Stop" -ForegroundColor DarkGray
+    Write-Host "  若仍显示 New API：强制刷新或清除该站 localStorage" -ForegroundColor DarkGray
   } finally {
     Pop-Location
   }

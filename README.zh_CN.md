@@ -142,17 +142,22 @@ stop.bat
 **Windows（Docker Compose）：**
 
 ```powershell
-.\scripts\deploy.ps1 -Mode docker
+.\scripts\deploy.ps1 -Mode docker              # 本地构建 + 启动 + 同步 Bony 品牌
+.\scripts\deploy.ps1 -Mode docker -NoBuild     # 不重建镜像
 .\scripts\deploy.ps1 -Mode docker -Stop
 ```
 
 **Linux / macOS（Docker Compose）：**
 
 ```bash
-./scripts/deploy.sh          # 生产镜像
+./scripts/deploy.sh                 # 本地 Dockerfile 构建 + 启动 + 同步 Bony 品牌
+./scripts/deploy.sh --no-build      # 不重建镜像
+./scripts/deploy.sh --no-sync-brand # 保留库里现有站点名/Logo
 ./scripts/deploy.sh --stop
-./scripts/deploy.sh --build  # 本地源码开发栈（docker-compose.dev.yml）
+./scripts/deploy.sh --build         # 开发栈（docker-compose.dev.yml）
 ```
+
+> **说明：** 默认会用仓库内 `Dockerfile` 构建 `new-api:local`（不再拉官方 `calciumion/new-api`），并在启动后把 `SystemName` / `Logo` / `Footer` 写入 Postgres。首次构建可能较慢；浏览器若仍显示旧名，请强制刷新或清除该站 localStorage。
 
 > **本地模式依赖：** 脚本会自动检测并安装 Go、Bun、Redis，以及前端/Go 模块依赖；启动前会强制释放 API / 前端 / Redis 端口占用。也可手动安装：Go 1.22+、[Bun](https://bun.sh)、Redis（Windows：`winget install taizod1024.redis-windows-fork`）。
 
@@ -402,14 +407,16 @@ docker run --name new-api -d --restart always \
 
 ```powershell
 # Windows
-.\scripts\deploy.ps1 -Mode docker
+.\scripts\deploy.ps1 -Mode docker              # 本地构建 + 同步 Bony 品牌
+.\scripts\deploy.ps1 -Mode docker -NoBuild
 ```
 
 ```bash
 # Linux / macOS
-./scripts/deploy.sh
+./scripts/deploy.sh                 # 本地构建 + 同步 Bony 品牌
+./scripts/deploy.sh --no-build
 ./scripts/deploy.sh --stop
-./scripts/deploy.sh --build   # 使用 docker-compose.dev.yml
+./scripts/deploy.sh --build         # 使用 docker-compose.dev.yml
 ```
 
 </details>

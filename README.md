@@ -142,17 +142,22 @@ After start: frontend at `http://localhost:5173/`, backend at `http://localhost:
 **Windows (Docker Compose):**
 
 ```powershell
-.\scripts\deploy.ps1 -Mode docker
+.\scripts\deploy.ps1 -Mode docker              # local build + sync Bony brand
+.\scripts\deploy.ps1 -Mode docker -NoBuild
 .\scripts\deploy.ps1 -Mode docker -Stop
 ```
 
 **Linux / macOS (Docker Compose):**
 
 ```bash
-./scripts/deploy.sh          # production image
+./scripts/deploy.sh                 # local Dockerfile build + sync Bony brand
+./scripts/deploy.sh --no-build
+./scripts/deploy.sh --no-sync-brand
 ./scripts/deploy.sh --stop
-./scripts/deploy.sh --build  # local source stack (docker-compose.dev.yml)
+./scripts/deploy.sh --build         # dev stack (docker-compose.dev.yml)
 ```
+
+> **Note:** Default deploy builds `new-api:local` from the repo Dockerfile (not `calciumion/new-api`) and writes `SystemName` / `Logo` / `Footer` into Postgres after startup. First build can take several minutes; if the browser still shows the old name, hard-refresh or clear site localStorage.
 
 > **Local mode requires:** The script auto-detects and installs Go, Bun, Redis, plus frontend/Go module deps; it also force-frees API / web / Redis ports before start. You can still install manually: Go 1.22+, [Bun](https://bun.sh), Redis (Windows: `winget install taizod1024.redis-windows-fork`).
 
@@ -403,14 +408,16 @@ docker run --name new-api -d --restart always \
 
 ```powershell
 # Windows
-.\scripts\deploy.ps1 -Mode docker
+.\scripts\deploy.ps1 -Mode docker              # local build + sync Bony brand
+.\scripts\deploy.ps1 -Mode docker -NoBuild
 ```
 
 ```bash
 # Linux / macOS
-./scripts/deploy.sh
+./scripts/deploy.sh                 # local build + sync Bony brand
+./scripts/deploy.sh --no-build
 ./scripts/deploy.sh --stop
-./scripts/deploy.sh --build   # uses docker-compose.dev.yml
+./scripts/deploy.sh --build         # uses docker-compose.dev.yml
 ```
 
 </details>
