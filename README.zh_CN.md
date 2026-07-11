@@ -107,6 +107,41 @@
 
 ## 🚀 快速开始
 
+### 一键部署脚本
+
+仓库提供 `scripts/deploy` 一键脚本，可按环境选择本地开发栈或 Docker 部署：
+
+**Windows（本地 SQLite + Redis + 后端 + 前端，默认）：**
+
+```powershell
+# 启动
+.\scripts\deploy.ps1
+# 或
+.\scripts\deploy.bat
+
+# 停止
+.\scripts\deploy.ps1 -Stop
+```
+
+启动后访问：前端 `http://localhost:5173/`，后端默认 `http://localhost:3000/`（若 3000 被占用会自动改用 `3001`，并以 `.env` 中的 `PORT` 为准）。
+
+**Windows（Docker Compose）：**
+
+```powershell
+.\scripts\deploy.ps1 -Mode docker
+.\scripts\deploy.ps1 -Mode docker -Stop
+```
+
+**Linux / macOS（Docker Compose）：**
+
+```bash
+./scripts/deploy.sh          # 生产镜像
+./scripts/deploy.sh --stop
+./scripts/deploy.sh --build  # 本地源码开发栈（docker-compose.dev.yml）
+```
+
+> **本地模式依赖：** Go 1.22+、[Bun](https://bun.sh)、Redis（Windows 可用 `winget install taizod1024.redis-windows-fork`）。首次运行会按需安装前端依赖并生成 `.env`。
+
 ### 使用 Docker Compose（推荐）
 
 ```bash
@@ -119,6 +154,9 @@ nano docker-compose.yml
 
 # 启动服务
 docker-compose up -d
+
+# 或使用一键脚本
+./scripts/deploy.sh
 ```
 
 <details>
@@ -337,7 +375,33 @@ docker run --name new-api -d --restart always \
 ### 🔧 部署方式
 
 <details>
-<summary><strong>方式 1：Docker Compose（推荐）</strong></summary>
+<summary><strong>方式 1：一键部署脚本</strong></summary>
+
+**Windows 本地开发（SQLite + Redis）：**
+
+```powershell
+.\scripts\deploy.ps1
+.\scripts\deploy.ps1 -Stop
+```
+
+**Docker Compose（Windows / Linux / macOS）：**
+
+```powershell
+# Windows
+.\scripts\deploy.ps1 -Mode docker
+```
+
+```bash
+# Linux / macOS
+./scripts/deploy.sh
+./scripts/deploy.sh --stop
+./scripts/deploy.sh --build   # 使用 docker-compose.dev.yml
+```
+
+</details>
+
+<details>
+<summary><strong>方式 2：Docker Compose（推荐）</strong></summary>
 
 ```bash
 # 克隆项目
@@ -349,12 +413,15 @@ nano docker-compose.yml
 
 # 启动服务
 docker-compose up -d
+
+# 或使用一键脚本
+./scripts/deploy.sh
 ```
 
 </details>
 
 <details>
-<summary><strong>方式 2：Docker 命令</strong></summary>
+<summary><strong>方式 3：Docker 命令</strong></summary>
 
 **使用 SQLite：**
 ```bash
@@ -382,7 +449,7 @@ docker run --name new-api -d --restart always \
 </details>
 
 <details>
-<summary><strong>方式 3：宝塔面板</strong></summary>
+<summary><strong>方式 4：宝塔面板</strong></summary>
 
 1. 安装宝塔面板（≥ 9.2.0 版本）
 2. 在应用商店搜索 **New-API**

@@ -102,6 +102,41 @@
 
 ## 🚀 Quick Start
 
+### One-Click Deploy Scripts
+
+Use `scripts/deploy` for a local development stack or Docker deployment:
+
+**Windows (local SQLite + Redis + API + frontend, default):**
+
+```powershell
+# Start
+.\scripts\deploy.ps1
+# or
+.\scripts\deploy.bat
+
+# Stop
+.\scripts\deploy.ps1 -Stop
+```
+
+After start: frontend at `http://localhost:5173/`, backend at `http://localhost:3000/` by default (falls back to `3001` if `3000` is busy; follows `PORT` in `.env`).
+
+**Windows (Docker Compose):**
+
+```powershell
+.\scripts\deploy.ps1 -Mode docker
+.\scripts\deploy.ps1 -Mode docker -Stop
+```
+
+**Linux / macOS (Docker Compose):**
+
+```bash
+./scripts/deploy.sh          # production image
+./scripts/deploy.sh --stop
+./scripts/deploy.sh --build  # local source stack (docker-compose.dev.yml)
+```
+
+> **Local mode requires:** Go 1.22+, [Bun](https://bun.sh), and Redis (on Windows: `winget install taizod1024.redis-windows-fork`). The script installs frontend deps and creates `.env` when needed.
+
 ### Using Docker Compose (Recommended)
 
 ```bash
@@ -114,6 +149,9 @@ nano docker-compose.yml
 
 # Start the service
 docker-compose up -d
+
+# Or use the one-click script
+./scripts/deploy.sh
 ```
 
 <details>
@@ -330,7 +368,33 @@ docker run --name new-api -d --restart always \
 ### 🔧 Deployment Methods
 
 <details>
-<summary><strong>Method 1: Docker Compose (Recommended)</strong></summary>
+<summary><strong>Method 1: One-Click Deploy Scripts</strong></summary>
+
+**Windows local development (SQLite + Redis):**
+
+```powershell
+.\scripts\deploy.ps1
+.\scripts\deploy.ps1 -Stop
+```
+
+**Docker Compose (Windows / Linux / macOS):**
+
+```powershell
+# Windows
+.\scripts\deploy.ps1 -Mode docker
+```
+
+```bash
+# Linux / macOS
+./scripts/deploy.sh
+./scripts/deploy.sh --stop
+./scripts/deploy.sh --build   # uses docker-compose.dev.yml
+```
+
+</details>
+
+<details>
+<summary><strong>Method 2: Docker Compose (Recommended)</strong></summary>
 
 ```bash
 # Clone the project
@@ -342,12 +406,15 @@ nano docker-compose.yml
 
 # Start service
 docker-compose up -d
+
+# Or use the one-click script
+./scripts/deploy.sh
 ```
 
 </details>
 
 <details>
-<summary><strong>Method 2: Docker Commands</strong></summary>
+<summary><strong>Method 3: Docker Commands</strong></summary>
 
 **Using SQLite:**
 ```bash
@@ -375,7 +442,7 @@ docker run --name new-api -d --restart always \
 </details>
 
 <details>
-<summary><strong>Method 3: BaoTa Panel</strong></summary>
+<summary><strong>Method 4: BaoTa Panel</strong></summary>
 
 1. Install BaoTa Panel (≥ 9.2.0 version)
 2. Search for **New-API** in the application store
