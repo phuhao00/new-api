@@ -17,6 +17,9 @@ COPY web/classic/package.json ./classic/package.json
 RUN bun install --frozen-lockfile
 COPY ./web/default ./default
 COPY ./VERSION /build/VERSION
+# COPY 会覆盖 bun workspace 在 default/ 下生成的 node_modules；
+# fonts.css 用 ../../node_modules（相对 default/src/styles），需指回 workspace 根依赖
+RUN rm -rf ./default/node_modules && ln -s /build/web/node_modules ./default/node_modules
 RUN cd default && DISABLE_ESLINT_PLUGIN='true' VITE_REACT_APP_VERSION=$(cat /build/VERSION) bun run build
 
 # Classic theme: optional (BUILD_CLASSIC=1). Default is a tiny placeholder so go:embed still works.
