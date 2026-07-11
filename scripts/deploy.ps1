@@ -8,12 +8,15 @@
     local  - 本地 SQLite + Redis + Go 后端 + 前端开发服务（默认）
     docker - Docker Compose 生产镜像一键拉起
 
+  本地模式会：
+    1. 检测并自动安装缺失依赖（Go / Bun / Redis / 前端 node_modules / Go modules）
+    2. 强制释放项目所需端口上的占用进程，确保可以启动
+
 .EXAMPLE
   .\scripts\deploy.ps1
   .\scripts\deploy.ps1 -Mode local
   .\scripts\deploy.ps1 -Mode docker
   .\scripts\deploy.ps1 -Stop
-  .\scripts\deploy.ps1 -Mode docker -Stop
 #>
 [CmdletBinding()]
 param(
@@ -26,7 +29,10 @@ param(
 
   [int]$WebPort = 5173,
 
-  [int]$RedisPort = 6379
+  [int]$RedisPort = 6379,
+
+  # 启动前强制杀掉占用所需端口的进程（默认开启）
+  [bool]$ForceFreePorts = $true
 )
 
 $ErrorActionPreference = 'Stop'
@@ -35,6 +41,7 @@ $PidFile = Join-Path $Root '.local-deploy.pids'
 $EnvFile = Join-Path $Root '.env'
 $LogDir = Join-Path $Root 'logs'
 $DataDir = Join-Path $Root 'data'
+$Winget = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe'
 
 function Write-Step([string]$Message) {
   Write-Host "[deploy] $Message" -ForegroundColor Cyan
@@ -51,35 +58,185 @@ function Write-Warn([string]$Message) {
 function Refresh-Path {
   $machine = [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
   $user = [System.Environment]::GetEnvironmentVariable('Path', 'User')
-  $env:Path = "$machine;$user;C:\Program Files\Go\bin;C:\Users\$env:USERNAME\.bun\bin;$env:Path"
+  $bunBin = Join-Path $env:USERPROFILE '.bun\bin'
+  $goBin = 'C:\Program Files\Go\bin'
+  $env:Path = "$machine;$user;$goBin;$bunBin;$env:Path"
 }
 
 function Test-Command([string]$Name) {
   return [bool](Get-Command $Name -ErrorAction SilentlyContinue)
 }
 
-function Get-ListeningPid([int]$Port) {
-  $lines = & "$env:SystemRoot\System32\netstat.exe" -ano 2>$null | Select-String "LISTENING" | Select-String ":$Port "
+function Get-ListeningPids([int]$Port) {
+  $pids = New-Object System.Collections.Generic.HashSet[int]
+  $lines = & "$env:SystemRoot\System32\netstat.exe" -ano 2>$null |
+    Select-String "LISTENING" |
+    Select-String ":$Port\s"
   foreach ($line in $lines) {
     if ($line -match '\s+(\d+)\s*$') {
-      return [int]$Matches[1]
+      [void]$pids.Add([int]$Matches[1])
     }
   }
+  return @($pids)
+}
+
+function Get-ListeningPid([int]$Port) {
+  $list = Get-ListeningPids $Port
+  if ($list.Count -gt 0) { return $list[0] }
   return $null
 }
 
-function Stop-Port([int]$Port) {
-  $pidOnPort = Get-ListeningPid $Port
-  if ($pidOnPort) {
-    Stop-Process -Id $pidOnPort -Force -ErrorAction SilentlyContinue
-    Write-Step "已释放端口 $Port (PID $pidOnPort)"
+function Get-ProcessLabel([int]$ProcessId) {
+  $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction SilentlyContinue
+  if (-not $proc) { return "pid=$ProcessId" }
+  $name = $proc.Name
+  $cmd = $proc.CommandLine
+  if ($cmd -and $cmd.Length -gt 80) { $cmd = $cmd.Substring(0, 80) + '...' }
+  if ($cmd) { return "$name ($cmd)" }
+  return $name
+}
+
+function Stop-ProcessTree([int]$ProcessId) {
+  if ($ProcessId -le 0) { return }
+  # /T 结束子进程树，避免 go run 残留 main.exe
+  & "$env:SystemRoot\System32\taskkill.exe" /F /T /PID $ProcessId 2>$null | Out-Null
+  Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+}
+
+function Clear-PortForce([int]$Port, [string]$Role) {
+  $pids = Get-ListeningPids $Port
+  if ($pids.Count -eq 0) { return }
+
+  foreach ($pidOnPort in $pids) {
+    $label = Get-ProcessLabel $pidOnPort
+    Write-Warn "端口 $Port ($Role) 被占用: $label — 正在结束进程 $pidOnPort"
+    Stop-ProcessTree $pidOnPort
+  }
+
+  Start-Sleep -Milliseconds 500
+  $left = Get-ListeningPids $Port
+  if ($left.Count -gt 0) {
+    foreach ($pidOnPort in $left) {
+      Write-Warn "重试结束端口 $Port 占用进程 $pidOnPort"
+      Stop-ProcessTree $pidOnPort
+    }
+    Start-Sleep -Milliseconds 500
+  }
+
+  if ((Get-ListeningPids $Port).Count -gt 0) {
+    throw "无法释放端口 $Port ($Role)，请手动结束占用进程后重试"
+  }
+  Write-Ok "端口 $Port ($Role) 已释放"
+}
+
+function Install-WithWinget([string]$PackageId, [string]$DisplayName) {
+  if (-not (Test-Path $Winget)) {
+    throw "未找到 winget，无法自动安装 $DisplayName。请手动安装后重试。"
+  }
+  Write-Step "正在通过 winget 安装 $DisplayName ($PackageId)..."
+  & $Winget install --id $PackageId -e --accept-package-agreements --accept-source-agreements
+  if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {
+    # -1978335189 = already installed
+    throw "winget 安装 $DisplayName 失败 (exit=$LASTEXITCODE)"
+  }
+  Refresh-Path
+}
+
+function Ensure-Go {
+  Refresh-Path
+  if (Test-Command 'go') {
+    Write-Ok "Go: $(go version)"
+    return
+  }
+  Install-WithWinget 'GoLang.Go' 'Go'
+  Refresh-Path
+  if (-not (Test-Command 'go')) {
+    throw "Go 安装后仍未找到 go 命令，请重新打开终端后再运行"
+  }
+  Write-Ok "Go: $(go version)"
+}
+
+function Ensure-Bun {
+  Refresh-Path
+  if (Test-Command 'bun') {
+    Write-Ok "Bun: $(bun --version)"
+    return
+  }
+  Write-Step "正在安装 Bun..."
+  try {
+    irm https://bun.sh/install.ps1 | iex
+  } catch {
+    throw "Bun 安装失败: $($_.Exception.Message)"
+  }
+  Refresh-Path
+  if (-not (Test-Command 'bun')) {
+    throw "Bun 安装后仍未找到 bun 命令，请重新打开终端后再运行"
+  }
+  Write-Ok "Bun: $(bun --version)"
+}
+
+function Ensure-Redis {
+  Refresh-Path
+  if (Test-Command 'redis-server') {
+    Write-Ok "Redis: $(redis-server --version 2>&1 | Select-Object -First 1)"
+    return
+  }
+  Install-WithWinget 'taizod1024.redis-windows-fork' 'Redis'
+  Refresh-Path
+  if (-not (Test-Command 'redis-server')) {
+    throw "Redis 安装后仍未找到 redis-server，请重新打开终端后再运行"
+  }
+  Write-Ok "Redis: $(redis-server --version 2>&1 | Select-Object -First 1)"
+}
+
+function Ensure-GoModules {
+  Write-Step "检查 Go 模块依赖..."
+  Push-Location $Root
+  try {
+    $env:GOPROXY = 'https://goproxy.cn,direct'
+    $env:GOSUMDB = 'sum.golang.google.cn'
+    go mod download
+    Write-Ok "Go 模块依赖就绪"
+  } finally {
+    Pop-Location
   }
 }
 
-function Ensure-EnvFile([int]$Port) {
-  if (Test-Path $EnvFile) {
-    return
+function Ensure-WebDependencies {
+  $webRoot = Join-Path $Root 'web'
+  $nm = Join-Path $webRoot 'node_modules'
+  $needInstall = -not (Test-Path $nm)
+  if (-not $needInstall) {
+    $pkgCount = @(Get-ChildItem $nm -ErrorAction SilentlyContinue).Count
+    if ($pkgCount -lt 50) { $needInstall = $true }
   }
+
+  if ($needInstall) {
+    Write-Step "安装前端依赖 (bun install)..."
+    Push-Location $webRoot
+    try {
+      bun install --registry https://registry.npmmirror.com
+      if ($LASTEXITCODE -ne 0) {
+        Write-Warn "npmmirror 安装异常，改用默认 registry 重试..."
+        bun pm cache rm 2>$null | Out-Null
+        bun install
+      }
+      if ($LASTEXITCODE -ne 0) {
+        throw "前端依赖安装失败"
+      }
+    } finally {
+      Pop-Location
+    }
+    Write-Ok "前端依赖安装完成"
+  } else {
+    Write-Ok "前端依赖已存在"
+  }
+
+  Ensure-NodeModulesJunction
+}
+
+function Ensure-EnvFile([int]$Port) {
+  if (Test-Path $EnvFile) { return }
 
   Write-Step "未找到 .env，正在生成本地默认配置..."
   @"
@@ -133,9 +290,7 @@ function Save-Pids([hashtable]$Map) {
 
 function Read-Pids {
   $map = @{}
-  if (-not (Test-Path $PidFile)) {
-    return $map
-  }
+  if (-not (Test-Path $PidFile)) { return $map }
   Get-Content $PidFile | ForEach-Object {
     if ($_ -match '^([^=]+)=(\d+)$') {
       $map[$Matches[1]] = [int]$Matches[2]
@@ -148,7 +303,7 @@ function Test-PortOpen([int]$Port) {
   try {
     $client = New-Object System.Net.Sockets.TcpClient
     $iar = $client.BeginConnect('127.0.0.1', $Port, $null, $null)
-    $ok = $iar.AsyncWaitHandle.WaitOne(1000, $false)
+    $ok = $iar.AsyncWaitHandle.WaitOne(800, $false)
     if (-not $ok) {
       $client.Close()
       return $false
@@ -161,19 +316,36 @@ function Test-PortOpen([int]$Port) {
   }
 }
 
-function Test-HttpOk([string]$Url) {
-  try {
-    $req = [System.Net.HttpWebRequest]::Create($Url)
-    $req.Method = 'GET'
-    $req.Timeout = 2000
-    $req.ReadWriteTimeout = 2000
-    $resp = $req.GetResponse()
-    $code = [int]$resp.StatusCode
-    $resp.Close()
-    return ($code -ge 200 -and $code -lt 500)
-  } catch {
-    return $false
+function Resolve-ApiPort {
+  if ($ApiPort -gt 0) { return $ApiPort }
+  if (Test-Path $EnvFile) {
+    $portLine = Get-Content $EnvFile | Where-Object { $_ -match '^\s*PORT\s*=' } | Select-Object -First 1
+    if ($portLine -match 'PORT\s*=\s*(\d+)') {
+      return [int]$Matches[1]
+    }
   }
+  return 3000
+}
+
+function Sync-EnvPort([int]$Port) {
+  if (-not (Test-Path $EnvFile)) {
+    Ensure-EnvFile $Port
+    return
+  }
+  $lines = Get-Content $EnvFile
+  $found = $false
+  $newLines = foreach ($line in $lines) {
+    if ($line -match '^\s*PORT\s*=') {
+      $found = $true
+      "PORT=$Port"
+    } else {
+      $line
+    }
+  }
+  if (-not $found) {
+    $newLines = @("PORT=$Port") + $newLines
+  }
+  Set-Content -Path $EnvFile -Value $newLines -Encoding utf8
 }
 
 function Stop-Local {
@@ -181,60 +353,30 @@ function Stop-Local {
   $pids = Read-Pids
   foreach ($name in @('api', 'web', 'redis')) {
     if ($pids.ContainsKey($name)) {
-      Stop-Process -Id $pids[$name] -Force -ErrorAction SilentlyContinue
+      Stop-ProcessTree $pids[$name]
     }
   }
 
-  # 仅结束本仓库相关进程，避免误杀其他占用 3000 的项目
   Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
     Where-Object {
       $_.CommandLine -and (
-        ($_.CommandLine -match 'go run main\.go' -and $_.CommandLine -match [regex]::Escape($Root)) -or
+        ($_.CommandLine -match 'go run main\.go' -and $_.CommandLine -match [regex]::Escape([string]$Root)) -or
         ($_.CommandLine -match 'main\.exe' -and $_.CommandLine -match 'go-build|cursor-sandbox-cache') -or
         ($_.CommandLine -match 'rsbuild' -and $_.CommandLine -match [regex]::Escape((Join-Path $Root 'web'))) -or
-        ($_.CommandLine -match 'redis-server' -and $_.CommandLine -match "--port $RedisPort")
+        ($_.CommandLine -match 'redis-server')
       )
     } |
-    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    ForEach-Object { Stop-ProcessTree $_.ProcessId }
 
-  $portToFree = $ApiPort
-  if ($portToFree -le 0 -and (Test-Path $EnvFile)) {
-    $portLine = Get-Content $EnvFile | Where-Object { $_ -match '^\s*PORT\s*=' } | Select-Object -First 1
-    if ($portLine -match 'PORT\s*=\s*(\d+)') {
-      $portToFree = [int]$Matches[1]
-    }
-  }
-  if ($portToFree -le 0) {
-    $portToFree = 3001
-  }
-  # 不要默认清扫 3000，避免误杀其他项目
-  $apiPid = Get-ListeningPid $portToFree
-  if ($apiPid) {
-    $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$apiPid" -ErrorAction SilentlyContinue
-    if ($proc -and $proc.CommandLine -and (
-      $proc.CommandLine -match 'go-build|cursor-sandbox-cache|go run main' -or
-      $proc.Name -match 'main|go'
+  $port = Resolve-ApiPort
+  foreach ($item in @(
+      @{ Port = $port; Role = 'API' },
+      @{ Port = $WebPort; Role = 'Web' },
+      @{ Port = $RedisPort; Role = 'Redis' }
     )) {
-      Stop-Process -Id $apiPid -Force -ErrorAction SilentlyContinue
-      Write-Step "已释放端口 $portToFree (PID $apiPid)"
-    }
-  }
-
-  $webPid = Get-ListeningPid $WebPort
-  if ($webPid) {
-    $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$webPid" -ErrorAction SilentlyContinue
-    if ($proc -and $proc.CommandLine -and $proc.CommandLine -match 'rsbuild') {
-      Stop-Process -Id $webPid -Force -ErrorAction SilentlyContinue
-      Write-Step "已释放端口 $WebPort (PID $webPid)"
-    }
-  }
-
-  $redisPid = Get-ListeningPid $RedisPort
-  if ($redisPid) {
-    $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$redisPid" -ErrorAction SilentlyContinue
-    if ($proc -and $proc.Name -match 'redis') {
-      Stop-Process -Id $redisPid -Force -ErrorAction SilentlyContinue
-      Write-Step "已释放端口 $RedisPort (PID $redisPid)"
+    foreach ($pidOnPort in (Get-ListeningPids $item.Port)) {
+      Write-Step "停止占用 $($item.Role) 端口 $($item.Port) 的进程 $pidOnPort"
+      Stop-ProcessTree $pidOnPort
     }
   }
 
@@ -265,6 +407,10 @@ function Start-Docker {
     throw "未安装 Docker。请先安装 Docker Desktop，或改用: .\scripts\deploy.ps1 -Mode local"
   }
 
+  if ($ForceFreePorts) {
+    Clear-PortForce 3000 'Docker-API'
+  }
+
   New-Item -ItemType Directory -Force -Path $DataDir, $LogDir | Out-Null
   Write-Step "启动 Docker Compose（镜像 calciumion/new-api:latest）..."
   Push-Location $Root
@@ -274,7 +420,7 @@ function Start-Docker {
     $ok = $false
     for ($i = 0; $i -lt 60; $i++) {
       Start-Sleep -Seconds 2
-      if ((Test-PortOpen 3000) -and (Test-HttpOk 'http://127.0.0.1:3000/api/status')) {
+      if (Test-PortOpen 3000) {
         $ok = $true
         break
       }
@@ -294,61 +440,38 @@ function Start-Docker {
   }
 }
 
-function Resolve-ApiPort {
-  if ($ApiPort -gt 0) {
-    return $ApiPort
-  }
-  if (Test-Path $EnvFile) {
-    $portLine = Get-Content $EnvFile | Where-Object { $_ -match '^\s*PORT\s*=' } | Select-Object -First 1
-    if ($portLine -match 'PORT\s*=\s*(\d+)') {
-      return [int]$Matches[1]
-    }
-  }
-  $busy = Get-ListeningPid 3000
-  if ($busy) {
-    Write-Warn "端口 3000 已被占用，改用 3001"
-    return 3001
-  }
-  return 3000
-}
-
 function Start-Local {
-  Refresh-Path
-
-  if (-not (Test-Command 'go')) {
-    throw "未找到 go，请先安装 Go 1.22+"
-  }
-  if (-not (Test-Command 'bun')) {
-    throw "未找到 bun，请先安装: irm bun.sh/install.ps1 | iex"
-  }
-  if (-not (Test-Command 'redis-server')) {
-    throw "未找到 redis-server。可用 winget 安装: winget install taizod1024.redis-windows-fork"
-  }
-
-  $port = Resolve-ApiPort
-  Ensure-EnvFile $port
+  Write-Step "检查并安装依赖..."
+  Ensure-Go
+  Ensure-Bun
+  Ensure-Redis
+  Ensure-GoModules
+  Ensure-WebDependencies
   Ensure-EmbedPlaceholders
   New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
-  # 前端依赖
-  $webRoot = Join-Path $Root 'web'
-  if (-not (Test-Path (Join-Path $webRoot 'node_modules'))) {
-    Write-Step "安装前端依赖..."
-    Push-Location $webRoot
-    try {
-      bun install --registry https://registry.npmmirror.com
-    } finally {
-      Pop-Location
+  $port = Resolve-ApiPort
+  Ensure-EnvFile $port
+  Sync-EnvPort $port
+
+  Write-Step "清理占用端口，确保可启动 (API=$port Web=$WebPort Redis=$RedisPort)..."
+  # 先停本仓库旧进程，再强制清端口
+  $oldPids = Read-Pids
+  foreach ($name in @('api', 'web', 'redis')) {
+    if ($oldPids.ContainsKey($name)) {
+      Stop-ProcessTree $oldPids[$name]
     }
   }
-  Ensure-NodeModulesJunction
-
-  Stop-Local | Out-Null
-  Start-Sleep -Seconds 1
+  if ($ForceFreePorts) {
+    Clear-PortForce $port 'API'
+    Clear-PortForce $WebPort 'Web'
+    Clear-PortForce $RedisPort 'Redis'
+  }
 
   Write-Step "启动 Redis (:$RedisPort)..."
-  $redisDir = Split-Path (Get-Command redis-server).Source
-  $redisProc = Start-Process -FilePath 'redis-server' -ArgumentList "--port $RedisPort" -WorkingDirectory $redisDir -WindowStyle Hidden -PassThru
+  $redisCmd = Get-Command redis-server
+  $redisDir = Split-Path $redisCmd.Source
+  $redisProc = Start-Process -FilePath $redisCmd.Source -ArgumentList "--port $RedisPort" -WorkingDirectory $redisDir -WindowStyle Hidden -PassThru
 
   Write-Step "启动后端 API (:$port)..."
   $apiOut = Join-Path $LogDir 'api.out.log'
@@ -391,18 +514,10 @@ function Start-Local {
   Write-Step "等待服务就绪..."
   $apiOk = $false
   $webOk = $false
-  for ($i = 0; $i -lt 90; $i++) {
+  for ($i = 0; $i -lt 120; $i++) {
     Start-Sleep -Seconds 1
-    if (-not $apiOk) {
-      if ((Test-PortOpen $port) -and (Test-HttpOk "http://127.0.0.1:$port/api/status")) {
-        $apiOk = $true
-      }
-    }
-    if (-not $webOk) {
-      if ((Test-PortOpen $WebPort) -and (Test-HttpOk "http://127.0.0.1:$WebPort/")) {
-        $webOk = $true
-      }
-    }
+    if (-not $apiOk -and (Test-PortOpen $port)) { $apiOk = $true }
+    if (-not $webOk -and (Test-PortOpen $WebPort)) { $webOk = $true }
     if ($apiOk -and $webOk) { break }
   }
 
@@ -410,13 +525,15 @@ function Start-Local {
     Write-Ok "本地部署成功"
   } else {
     Write-Warn "进程已启动，但部分服务尚未就绪，请查看 logs/ 目录日志"
+    if (-not $apiOk) { Write-Warn "API 日志: $apiErr" }
+    if (-not $webOk) { Write-Warn "Web 日志: $webErr" }
   }
 
   Write-Host ""
   Write-Host "  前端:  http://localhost:$WebPort/" -ForegroundColor Green
   Write-Host "  后端:  http://localhost:$port/" -ForegroundColor Green
   Write-Host "  Redis: localhost:$RedisPort" -ForegroundColor Green
-  Write-Host "  停止:  .\scripts\deploy.ps1 -Stop" -ForegroundColor DarkGray
+  Write-Host "  停止:  .\stop.bat   或  .\scripts\deploy.ps1 -Stop" -ForegroundColor DarkGray
   Write-Host "  日志:  $LogDir" -ForegroundColor DarkGray
 }
 

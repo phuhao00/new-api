@@ -109,9 +109,23 @@
 
 ### 一键部署脚本
 
-仓库提供 `scripts/deploy` 一键脚本，可按环境选择本地开发栈或 Docker 部署：
+仓库提供 `scripts/deploy` 一键脚本，可按环境选择本地开发栈或 Docker 部署。
 
-**Windows（本地 SQLite + Redis + 后端 + 前端，默认）：**
+**Windows 最简用法（推荐，可双击）：**
+
+```bat
+start.bat
+stop.bat
+```
+
+或：
+
+```powershell
+.\start.ps1
+.\stop.ps1
+```
+
+**Windows（本地 SQLite + Redis + 后端 + 前端）：**
 
 ```powershell
 # 启动
@@ -140,7 +154,7 @@
 ./scripts/deploy.sh --build  # 本地源码开发栈（docker-compose.dev.yml）
 ```
 
-> **本地模式依赖：** Go 1.22+、[Bun](https://bun.sh)、Redis（Windows 可用 `winget install taizod1024.redis-windows-fork`）。首次运行会按需安装前端依赖并生成 `.env`。
+> **本地模式依赖：** 脚本会自动检测并安装 Go、Bun、Redis，以及前端/Go 模块依赖；启动前会强制释放 API / 前端 / Redis 端口占用。也可手动安装：Go 1.22+、[Bun](https://bun.sh)、Redis（Windows：`winget install taizod1024.redis-windows-fork`）。
 
 ### 使用 Docker Compose（推荐）
 

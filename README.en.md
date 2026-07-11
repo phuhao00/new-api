@@ -104,9 +104,23 @@
 
 ### One-Click Deploy Scripts
 
-Use `scripts/deploy` for a local development stack or Docker deployment:
+Use `scripts/deploy` for a local development stack or Docker deployment.
 
-**Windows (local SQLite + Redis + API + frontend, default):**
+**Windows simplest (recommended, double-clickable):**
+
+```bat
+start.bat
+stop.bat
+```
+
+or:
+
+```powershell
+.\start.ps1
+.\stop.ps1
+```
+
+**Windows (local SQLite + Redis + API + frontend):**
 
 ```powershell
 # Start
@@ -135,7 +149,7 @@ After start: frontend at `http://localhost:5173/`, backend at `http://localhost:
 ./scripts/deploy.sh --build  # local source stack (docker-compose.dev.yml)
 ```
 
-> **Local mode requires:** Go 1.22+, [Bun](https://bun.sh), and Redis (on Windows: `winget install taizod1024.redis-windows-fork`). The script installs frontend deps and creates `.env` when needed.
+> **Local mode requires:** The script auto-detects and installs Go, Bun, Redis, plus frontend/Go module deps; it also force-frees API / web / Redis ports before start. You can still install manually: Go 1.22+, [Bun](https://bun.sh), Redis (Windows: `winget install taizod1024.redis-windows-fork`).
 
 ### Using Docker Compose (Recommended)
 
